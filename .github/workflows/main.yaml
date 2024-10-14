@@ -1,3 +1,4 @@
+name: Deploy Infra y Nginx
 
 on:
   workflow_dispatch:
