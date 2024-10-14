@@ -2,6 +2,10 @@
 
 Este proyecto implementa un pipeline de CI/CD para desplegar una instancia EC2 en AWS, crear un cluster EKS, y desplegar una aplicación Nginx junto con herramientas de monitoreo (EFK stack y Prometheus/Grafana).
 
+La version 6 implementa el chequeo de la infraestructura para implementar solo los cambios en los pods en caso de ya existir las instancia EC2 y el cluster.
+
+Ademas, se puede seleccionar la rama a deployar
+
 ## Estructura del Proyecto
 
 ├── .github
