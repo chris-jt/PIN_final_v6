@@ -182,20 +182,12 @@ jobs:
       - name: Copy and execute ec2_user_data.sh on EC2
         if: needs.Deploy_CloudFormation.outputs.stack_updated == 'true'
         run: |
-          # Copiar el archivo al EC2
-          scp -i jenkins.pem -o StrictHostKeyChecking=no ec2_user_data.sh ubuntu@${{ needs.Deploy_CloudFormation.outputs.ec2_ip }}:~/ec2_user_data.sh 
-          
-          # Establecer permisos de ejecución
-          ssh -i jenkins.pem -o StrictHostKeyChecking=no ubuntu@${{ needs.Deploy_CloudFormation.outputs.ec2_ip }} 'chmod +x ~/ec2_user_data.sh'
-          
-          # Ejecutar el script con las variables de entorno
           ssh -i jenkins.pem -o StrictHostKeyChecking=no ubuntu@${{ needs.Deploy_CloudFormation.outputs.ec2_ip }} \
           'CLUSTER_NAME=${{ env.CLUSTER_NAME }} \
           AWS_REGION=${{ env.AWS_REGION }} \
           NODE_TYPE=${{ env.NODE_TYPE }} \
-          NODE_COUNT=${{ env.NODE_COUNT }} \
-          ~/ec2_user_data.sh'
-          
+          NODE_COUNT=${{ env.NODE_COUNT }} bash -s' < ec2_user_data.sh
+
       - name: Get cluster info
         id: cluster_info
         run: |

@@ -2,7 +2,6 @@
 set -x
 
 # Variables de entorno
-# Acceder a las variables de entorno
 echo "Cluster Name: $CLUSTER_NAME"
 echo "AWS Region: $AWS_REGION"
 echo "Node Type: $NODE_TYPE"
