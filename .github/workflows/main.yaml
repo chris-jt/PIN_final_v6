@@ -14,10 +14,13 @@ jobs:
   Credenciales:
     runs-on: ubuntu-latest
     steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
     - name: Configure AWS credentials
       uses: aws-actions/configure-aws-credentials@v2
       with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-access-key-id: ${{secrets.AWS_ACCESS_KEY_ID }}
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
         
@@ -31,11 +34,11 @@ jobs:
     - name: Upload SSH key
       uses: actions/upload-artifact@v3
       with:
-        name: ssh-key
-        path: |
-          jenkins.pem
-          jenkins.pub
-
+          name: ssh-key
+          path: |
+            jenkins.pem
+            jenkins.pub
+  
     - name: Upload CloudFormation template
       uses: actions/upload-artifact@v3
       with:
