@@ -1,0 +1,489 @@
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Rama a ejecutar'
+        required: true
+        default: 'main'
+        type: choice
+        options:
+        - main
+        - branch-1
+
+env:
+  AWS_REGION: us-east-1
+  CLUSTER_NAME: cluster-PIN 
+  NODE_TYPE: t3.medium
+  NODE_COUNT: 3
+  AMI_ID: ami-0261755bbcb8c4a84  # AMI ID for Ubuntu 20.04 LTS in us-east-1
+  
+jobs: 
+  Credenciales:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      with:
+        ref: \${{ github.event.inputs.branch }}
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        aws-access-key-id: \${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: \${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: \${{ env.AWS_REGION }}
+        
+    - name: Generate SSH key
+      run: |
+        if [ ! -f jenkins.pem ]; then
+          ssh-keygen -t rsa -b 4096 -f jenkins.pem -N ""
+          mv jenkins.pem.pub jenkins.pub
+        fi
+
+    - name: Upload SSH key
+      uses: actions/upload-artifact@v3
+      with:
+        name: ssh-key
+        path: |
+          jenkins.pem
+          jenkins.pub
+
+    - name: Upload CloudFormation template
+      uses: actions/upload-artifact@v3
+      with:
+        name: cloudformation-template
+        path: cloudformation/ec2-stack.yaml
+
+  Deploy_CloudFormation:
+    needs: Credenciales
+    runs-on: ubuntu-latest
+    outputs:
+      ec2_ip: \${{ steps.ec2-ip.outputs.ec2_ip }}
+      stack_updated: \${{ steps.deploy-cfn.outputs.stack_updated }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      with:
+        ref: \${{ github.event.inputs.branch }}   
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        aws-access-key-id: \${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: \${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: \${{ env.AWS_REGION }}
+
+    - name: Download SSH key
+      uses: actions/download-artifact@v3
+      with:
+        name: ssh-key
+
+    - name: Download CloudFormation template
+      uses: actions/download-artifact@v3
+      with:
+        name: cloudformation-template
+        path: cloudformation
+
+    - name: Deploy or update CloudFormation stack
+      id: deploy-cfn     
+      run: |
+        STACK_NAME=jenkins-ec2-stack
+        if aws cloudformation describe-stacks --stack-name $STACK_NAME 2>&1 | grep -q 'does not exist'; then
+          echo "Stack does not exist. Creating new stack..."
+          aws cloudformation deploy \
+            --template-file cloudformation/ec2-stack.yaml \
+            --stack-name $STACK_NAME \
+            --parameter-overrides \
+              KeyName=jenkins \
+              PublicKeyMaterial="$(cat jenkins.pub)" \
+              InstanceType="\${{ env.NODE_TYPE }}" \
+              AMI="\${{ env.AMI_ID }}" \
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM
+          echo "stack_updated=true" >> $GITHUB_OUTPUT
+        else
+          echo "Stack exists. Checking for changes..."
+          CHANGE_SET_NAME="change-set-$(date +%s)"
+          aws cloudformation create-change-set \
+            --stack-name $STACK_NAME \
+            --template-body file://cloudformation/ec2-stack.yaml \
+            --change-set-name $CHANGE_SET_NAME \
+            --parameters \
+              ParameterKey=KeyName,ParameterValue=jenkins \
+              ParameterKey=PublicKeyMaterial,ParameterValue="$(cat jenkins.pub)" \
+              ParameterKey=InstanceType,ParameterValue="\${{ env.NODE_TYPE }}" \
+              ParameterKey=AMI,ParameterValue="\${{ env.AMI_ID }}" \
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM
+
+          # Wait for change set creation
+          aws cloudformation wait change-set-create-complete \
+            --stack-name $STACK_NAME \
+            --change-set-name $CHANGE_SET_NAME
+
+          # Check if there are changes
+          CHANGES=$(aws cloudformation describe-change-set \
+            --stack-name $STACK_NAME \
+            --change-set-name $CHANGE_SET_NAME \
+            --query 'Changes[].ResourceChange.ResourceType' \
+            --output text)
+
+          if [ -z "$CHANGES" ]; then
+            echo "No changes detected. Skipping update."
+            aws cloudformation delete-change-set \
+              --stack-name $STACK_NAME \
+              --change-set-name $CHANGE_SET_NAME
+            echo "stack_updated=false" >> $GITHUB_OUTPUT
+          else
+            echo "Changes detected. Updating stack..."
+            aws cloudformation execute-change-set \
+              --stack-name $STACK_NAME \
+              --change-set-name $CHANGE_SET_NAME
+            aws cloudformation wait stack-update-complete \
+              --stack-name $STACK_NAME
+            echo "stack_updated=true" >> $GITHUB_OUTPUT
+          fi
+        fi
+      env:
+        NODE_TYPE: \${{ env.NODE_TYPE }}
+        AMI_ID: \${{ env.AMI_ID }}
+
+    - name: Get EC2 Public IP
+      id: ec2-ip
+      run: |
+        EC2_IP=$(aws cloudformation describe-stacks --stack-name jenkins-ec2-stack --query "Stacks[0].Outputs[?OutputKey=='EC2PublicIP'].OutputValue" --output text)
+        echo "ec2_ip=$EC2_IP" >> $GITHUB_OUTPUT
+
+    - name: Wait for EC2 instance to be ready
+      run: |
+        echo "Waiting for EC2 instance to be ready..."
+        timeout 300 bash -c 'until nc -z \${{ steps.ec2-ip.outputs.ec2_ip }} 22; do sleep 5; done'
+
+    - name: Setup AWS credentials on EC2
+      run: |
+        chmod 600 jenkins.pem
+        ssh -i jenkins.pem -o StrictHostKeyChecking=no ubuntu@\${{ steps.ec2-ip.outputs.ec2_ip }} '
+        mkdir -p ~/.aws
+        echo "[default]
+        aws_access_key_id=\${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws_secret_access_key=\${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        region=\${{ env.AWS_REGION }}" > ~/.aws/credentials
+        '
+    - name: Upload SSH key and connection info
+      uses: actions/upload-artifact@v3
+      with:
+        name: ssh-key-and-info
+        path: |
+          jenkins.pem
+
+  Conexion_EC2:
+    needs: Deploy_CloudFormation
+    runs-on: ubuntu-latest
+    outputs:
+      cluster_name: \${{ steps.cluster_info.outputs.cluster_name }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          ref: \${{ github.event.inputs.branch }}  
+       
+      - name: Download SSH key
+        uses: actions/download-artifact@v3
+        with:
+          name: ssh-key
+        
+      - name: Set permissions for SSH key
+        run: chmod 600 jenkins.pem
+        
+      - name: Connect to EC2 and setup cluster
+        if: needs.Deploy_CloudFormation.outputs.stack_updated == 'true'
+        run: |
+          ssh -i jenkins.pem -o StrictHostKeyChecking=no ubuntu@\${{ needs.Deploy_CloudFormation.outputs.ec2_ip }} \
+          'CLUSTER_NAME=\${{ env.CLUSTER_NAME }} \
+          AWS_REGION=\${{ env.AWS_REGION }} \
+          NODE_TYPE=\${{ env.NODE_TYPE }} \
+          NODE_COUNT=\${{ env.NODE_COUNT }} bash -s' < ec2_user_data.sh
+
+      - name: Get cluster info
+        id: cluster_info
+        run: |
+          CLUSTER_NAME=$(ssh -i jenkins.pem -o StrictHostKeyChecking=no ubuntu@\${{ needs.Deploy_CloudFormation.outputs.ec2_ip }} 'echo $CLUSTER_NAME')
+          echo "cluster_name=$CLUSTER_NAME" >> $GITHUB_OUTPUT
+
+  Deploy_Nginx:
+      needs: [Deploy_CloudFormation, Conexion_EC2]
+      runs-on: ubuntu-latest
+      outputs:
+        nginx_url: \${{ steps.nginx-url.outputs.nginx_url }}
+      steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          ref: \${{ github.event.inputs.branch }}
+        
+      - name: Download SSH key
+        uses: actions/download-artifact@v3
+        with:
+          name: ssh-key
+        
+      - name: Set permissions for SSH key
+        run: chmod 600 jenkins.pem
+        
+      - name: Deploy Nginx
+        run: |
+            EC2_IP=\${{ needs.Deploy_CloudFormation.outputs.ec2_ip }}
+            # Copiar archivos al EC2        
+            scp -i jenkins.pem -o StrictHostKeyChecking=no kubernetes/nginx-deployment.yaml kubernetes/nginx-service.yaml kubernetes/nginx-index-html-configmap.yaml ubuntu@$EC2_IP:~
+                
+            # Aplicar los archivos
+            ssh -i jenkins.pem -o StrictHostKeyChecking=no ubuntu@$EC2_IP '
+            kubectl apply -f nginx-index-html-configmap.yaml
+            kubectl apply -f nginx-deployment.yaml
+            kubectl apply -f nginx-service.yaml
+          
+            # Esperar a que el pod esté listo
+            kubectl rollout status deployment/nginx
+            '
+          
+      - name: Get Nginx Service URL
+        id: nginx-url
+        run: |
+          EC2_IP=\${{ needs.Deploy_CloudFormation.outputs.ec2_ip }}
+          NGINX_URL=$(ssh -i jenkins.pem -o StrictHostKeyChecking=no ubuntu@$EC2_IP '
+          kubectl get service nginx-service -o jsonpath="{.status.loadBalancer.ingress[0].hostname}"
+          ')
+          echo "nginx_url=http://$NGINX_URL" >> $GITHUB_OUTPUT
+            
+      - name: Save initial connection information
+        run: |
+          echo "EC2 Public IP: \${{ needs.Deploy_CloudFormation.outputs.ec2_ip }}" > connection_info.txt
+          echo "Nginx Service URL: \${{ steps.nginx-url.outputs.nginx_url }}" >> connection_info.txt
+          echo "To connect via SSH: ssh -i jenkins.pem ubuntu@\${{ needs.Deploy_CloudFormation.outputs.ec2_ip }}" >> connection_info.txt
+          
+      - name: Upload initial connection info
+        uses: actions/upload-artifact@v3
+        with:
+          name: connection-info
+          path: connection_info.txt      
+  
+  Deploy_EFK:
+    needs: [Deploy_CloudFormation, Conexion_EC2]
+    runs-on: ubuntu-latest
+    outputs:
+      kibana_url: \${{ steps.kibana-url.outputs.kibana_url }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      with:
+        ref: \${{ github.event.inputs.branch }}
+
+    - name: Download SSH key
+      uses: actions/download-artifact@v3
+      with:
+        name: ssh-key
+
+    - name: Set permissions for SSH key
+      run: chmod 600 jenkins.pem
+
+    - name: Deploy EFK Stack
+      run: |
+        EC2_IP=\${{ needs.Deploy_CloudFormation.outputs.ec2_ip }}
+        scp -i jenkins.pem -o StrictHostKeyChecking=no kubernetes/*.yaml scripts/deploy-efk.sh ubuntu@$EC2_IP:~
+        ssh -i jenkins.pem -o StrictHostKeyChecking=no ubuntu@$EC2_IP 'bash deploy-efk.sh'
+
+    - name: Get Kibana URL
+      id: kibana-url
+      run: |
+        EC2_IP=\${{ needs.Deploy_CloudFormation.outputs.ec2_ip }}
+        KIBANA_URL=$(ssh -i jenkins.pem -o StrictHostKeyChecking=no ubuntu@$EC2_IP '
+          kubectl get service kibana -o jsonpath="{.status.loadBalancer.ingress[0].hostname}"
+        ')
+        echo "kibana_url=http://$KIBANA_URL" >> $GITHUB_OUTPUT
+
+  Deploy_Monitoring:
+    needs: [Deploy_CloudFormation, Conexion_EC2]
+    runs-on: ubuntu-latest
+    outputs:
+      grafana_url: \${{ steps.grafana-url.outputs.grafana_url }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      with:
+        ref: \${{ github.event.inputs.branch }}
+    
+    - name: Download SSH key
+      uses: actions/download-artifact@v3
+      with:
+        name: ssh-key
+    
+    - name: Set permissions for SSH key
+      run: chmod 600 jenkins.pem
+  
+    - name: Create IAM Service Account for EBS CSI Driver
+      run: |
+        EC2_IP=\${{ needs.Deploy_CloudFormation.outputs.ec2_ip }}
+        ssh -i jenkins.pem -o StrictHostKeyChecking=no ubuntu@$EC2_IP '
+        eksctl create iamserviceaccount \
+          --name ebs-csi-controller-sa \
+          --namespace kube-system \
+          --cluster \${{ env.CLUSTER_NAME }} \
+          --attach-policy-arn arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy \
+          --approve \
+          --override-existing-serviceaccounts \
+          --region \${{ env.AWS_REGION }}
+      
+        # Install EBS CSI Driver
+        kubectl apply -k "github.com/kubernetes-sigs/aws-ebs-csi-driver/deploy/kubernetes/overlays/stable/?ref=master"
+      
+        # Patch the EBS CSI Driver to use the new Service  Account
+        kubectl patch deployment ebs-csi-controller \
+          -n kube-system \
+          --type=json \
+          -p="[{\\"op\\": \\"replace\\", \\"path\\": \\"/spec/template/spec/serviceAccount\\", \\"value\\": \\"ebs-csi-controller-sa\\"}]"
+        '
+
+    - name: Deploy Prometheus and Grafana
+      run: |
+              EC2_IP=\${{ needs.Deploy_CloudFormation.outputs.ec2_ip }}
+              ssh -i jenkins.pem -o StrictHostKeyChecking=no ubuntu@$EC2_IP << EOF
+              GRAFANA_ADMIN_PASSWORD='\${{ secrets.GRAFANA_ADMIN_PASSWORD }}'
+              # Add Helm repo
+              kubectl create namespace prometheus --dry-run=client -o yaml | kubectl apply -f -
+              helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+              helm repo update
+      
+              # Install or upgrade Prometheus and Grafana
+              helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
+                --namespace prometheus \
+                --set grafana.adminPassword="\$GRAFANA_ADMIN_PASSWORD" \
+                --set prometheus.service.type=LoadBalancer \
+                --set grafana.service.type=LoadBalancer \
+                --set alertmanager.persistentVolume.storageClass="gp2" \
+                --set server.persistentVolume.storageClass="gp2" \
+                --set prometheus.prometheusSpec.podMonitorSelectorNilUsesHelmValues=false \
+                --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false \
+                --set prometheus.prometheusSpec.resources.requests.cpu="200m" \
+                --set prometheus.prometheusSpec.resources.limits.cpu="1000m" \
+                --set prometheus.prometheusSpec.resources.requests.memory="200Mi" \
+                --set prometheus.prometheusSpec.resources.limits.memory="1Gi" \
+                --set grafana.resources.requests.cpu="100m" \
+                --set grafana.resources.limits.cpu="500m" \
+                --set grafana.resources.requests.memory="128Mi" \
+                --set grafana.resources.limits.memory="256Mi"
+                
+              # Wait for pods to be ready
+              echo "Waiting for pods to be ready..."
+              kubectl rollout status deployment/monitoring-grafana -n prometheus
+              kubectl rollout status statefulset/prometheus-monitoring-kube-prometheus-prometheus -n prometheus
+
+              echo "Checking final status of pods:"
+              kubectl get pods -n prometheus
+
+              # Configure Prometheus as a data source in Grafana
+              GRAFANA_POD=$(kubectl get pods -n prometheus -l "app.kubernetes.io/name=grafana" -o jsonpath="{.items[0].metadata.name}")
+              PROMETHEUS_SVC=$(kubectl get svc -n prometheus -l "app=kube-prometheus-stack-prometheus" -o jsonpath="{.items[0].metadata.name}")
+
+              # Esperar un poco más para asegurarse de que Grafana esté completamente inicializado
+              sleep 60
+
+              kubectl exec -n prometheus $GRAFANA_POD -- curl -X POST -H "Content-Type: application/json" -d "{\\"name\\":\\"Prometheus\\",\\"type\\":\\"prometheus\\",\\"url\\":\\"http://$PROMETHEUS_SVC:9090\\",\\"access\\":\\"proxy\\",\\"isDefault\\":true}" http://admin:\${{ secrets.GRAFANA_ADMIN_PASSWORD }}@localhost:3000/api/datasources
+              EOF
+
+    - name: Get Grafana URL
+      id: grafana-url      
+      run: |           
+            EC2_IP=\${{ needs.Deploy_CloudFormation.outputs.ec2_ip }}            
+            GRAFANA_URL=$(ssh -i jenkins.pem -o StrictHostKeyChecking=no ubuntu@$EC2_IP '         
+            GRAFANA_SERVICE=$(kubectl get services -n prometheus -l "app.kubernetes.io/name=grafana" -o jsonpath="{.items[0].metadata.name}")           
+              if [ -z "$GRAFANA_SERVICE" ]; then            
+                  echo "Grafana service not found."            
+                  exit 1            
+              fi
+                       
+            # Obtener la URL del servicio de Grafana           
+            kubectl get service $GRAFANA_SERVICE -n prometheus -o jsonpath="{.status.loadBalancer.ingress[0].hostname}"                                
+            ')
+
+            # Verificar si se obtuvo la URL correctamente            
+              if [ -z "$GRAFANA_URL" ]; then           
+                echo "Failed to get Grafana URL"            
+                exit 1           
+              fi
+                      
+              # Guardar la URL de Grafana en el output           
+              echo "grafana_url=http://${GRAFANA_URL}" >> $GITHUB_OUTPUT            
+              echo "Grafana URL: http://${GRAFANA_URL}"            
+
+  Create_Connection_Info:
+    needs: [Deploy_CloudFormation, Deploy_Nginx, Deploy_EFK, Conexion_EC2, Deploy_Monitoring]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          ref: \${{ github.event.inputs.branch }}
+
+      - name: Create connection info
+        run: |
+          cat <<EOF > connection_info.txt
+          EC2 Public IP: \${{ needs.Deploy_CloudFormation.outputs.ec2_ip }}
+          Nginx Service URL: \${{ needs.Deploy_Nginx.outputs.nginx_url }}
+          Kibana URL: \${{ needs.Deploy_EFK.outputs.kibana_url }}
+          Grafana URL: \${{ needs.Deploy_Monitoring.outputs.grafana_url }}
+
+          To connect via SSH: ssh -i jenkins.pem ubuntu@\${{ needs.Deploy_CloudFormation.outputs.ec2_ip }}
+          EOF
+
+      - name: Upload connection info
+        uses: actions/upload-artifact@v3
+        with:
+          name: connection-info
+          path: connection_info.txt
+
+  Final_Setup:
+    needs: [Create_Connection_Info]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          ref: \${{ github.event.inputs.branch }}
+
+      - name: Download connection info
+        uses: actions/download-artifact@v3
+        with:
+          name: connection-info
+      - name: Display final connection info
+        run: cat connection_info.txt
+      - name: Upload final connection info
+        uses: actions/upload-artifact@v3
+        with:
+          name: connection-info
+          path: connection_info.txt
+
+  Download_Kubeconfig:
+    needs: [Deploy_CloudFormation, Conexion_EC2]
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      with:
+        ref: \${{ github.event.inputs.branch }}
+
+    - name: Download SSH key
+      uses: actions/download-artifact@v3
+      with:
+        name: ssh-key
+
+    - name: Set permissions for SSH key
+      run: chmod 600 jenkins.pem
+
+    - name: Download kubeconfig
+      run: |
+        EC2_IP=\${{ needs.Deploy_CloudFormation.outputs.ec2_ip }}
+        scp -i jenkins.pem -o StrictHostKeyChecking=no ubuntu@$EC2_IP:~/.kube/config ./kubeconfig
+
+    - name: Upload kubeconfig as artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: kubeconfig
+        path: ./kubeconfig

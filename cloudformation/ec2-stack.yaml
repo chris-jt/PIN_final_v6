@@ -1,0 +1,83 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CloudFormation template for Jenkins EC2 instance with EKS and EBS permissions'
+
+Parameters:
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instance
+    Type: String
+  PublicKeyMaterial:
+    Description: The public key material
+    Type: String
+  InstanceType:
+    Description: EC2 instance type
+    Type: String
+    Default: t2.medium
+  AMI:
+    Description: AMI ID for the EC2 instance
+    Type: String
+    Default: ami-0261755bbcb8c4a84  # Ubuntu 20.04 LTS
+
+Resources:
+  JenkinsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable SSH and Jenkins port
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: 0.0.0.0/0
+
+  JenkinsKeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Ref KeyName
+      PublicKeyMaterial: !Ref PublicKeyMaterial
+
+  JenkinsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryFullAccess
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+
+  JenkinsInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles:
+        - !Ref JenkinsRole
+
+  JenkinsInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      SecurityGroups:
+        - !Ref JenkinsSecurityGroup
+      KeyName: !Ref KeyName
+      ImageId: !Ref AMI
+      IamInstanceProfile: !Ref JenkinsInstanceProfile
+      Tags:
+        - Key: Name
+          Value: JenkinsServer
+
+Outputs:
+  EC2PublicIP:
+    Description: Public IP address of the Jenkins instance
+    Value: !GetAtt JenkinsInstance.PublicIp
+  JenkinsRoleArn:
+    Description: ARN of the Jenkins IAM Role
+    Value: !GetAtt JenkinsRole.Arn
