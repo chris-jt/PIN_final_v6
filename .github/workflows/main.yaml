@@ -180,7 +180,7 @@ jobs:
         run: chmod 600 jenkins.pem
 
       - name: Copy and execute ec2_user_data.sh on EC2
-        if: needs.Deploy_CloudFormation.outputs.stack_updated == 'true'
+
         run: |
           ssh -i jenkins.pem -o StrictHostKeyChecking=no ubuntu@${{ needs.Deploy_CloudFormation.outputs.ec2_ip }} \
           'CLUSTER_NAME=${{ env.CLUSTER_NAME }} \
