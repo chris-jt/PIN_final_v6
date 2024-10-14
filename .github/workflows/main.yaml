@@ -182,11 +182,11 @@ jobs:
       - name: Connect to EC2 and setup cluster
         if: needs.Deploy_CloudFormation.outputs.stack_updated == 'true'
         run: |
-          ssh -i jenkins.pem -o StrictHostKeyChecking=no ubuntu@${{ needs.Deploy_CloudFormation.outputs.ec2_ip }} \
-          'CLUSTER_NAME=${{ env.CLUSTER_NAME }} \
-          AWS_REGION=${{ env.AWS_REGION }} \
-          NODE_TYPE=${{ env.NODE_TYPE }} \
-          NODE_COUNT=${{ env.NODE_COUNT }} bash -s' < ec2_user_data.sh
+          ssh -i jenkins.pem -o StrictHostKeyChecking=no ubuntu@\${{ needs.Deploy_CloudFormation.outputs.ec2_ip }} \
+          'CLUSTER_NAME=\${{ env.CLUSTER_NAME }} \
+          AWS_REGION=\${{ env.AWS_REGION }} \
+          NODE_TYPE=\${{ env.NODE_TYPE }} \
+          NODE_COUNT=\${{ env.NODE_COUNT }} bash -s' < ec2_user_data.sh
 
       - name: Get cluster info
         id: cluster_info
