@@ -139,7 +139,6 @@ sudo chown ubuntu:ubuntu /home/ubuntu/.kube/config
 # Añadir kubectl al PATH del usuario ubuntu
 log 'export PATH=$PATH:/usr/local/bin' >> /home/ubuntu/.bashrc
 source /home/ubuntu/.bashrc
-
 aws eks update-kubeconfig --name $CLUSTER_NAME --region $AWS_REGION
 
 log "Configuración del cluster EKS completada."
