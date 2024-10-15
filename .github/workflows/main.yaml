@@ -53,9 +53,7 @@ jobs:
       stack_updated: ${{ steps.deploy-cfn.outputs.stack_updated }}
     steps:
     - name: Checkout code
-      uses: actions/checkout@v3
-      with:
-        ref: ${{ github.event.inputs.branch }}   
+      uses: actions/checkout@v3 
 
     - name: Configure AWS credentials
       uses: aws-actions/configure-aws-credentials@v2
@@ -98,58 +96,7 @@ jobs:
           echo "stack_updated=true" >> $GITHUB_OUTPUT
         else
           echo "Stack exists. Checking for changes..."
-          CHANGE_SET_NAME="change-set-$(date +%s)"
-          if ! aws cloudformation create-change-set \
-            --stack-name $STACK_NAME \
-            --template-body file://cloudformation/ec2-stack.yaml \
-            --change-set-name $CHANGE_SET_NAME \
-            --parameters \
-              ParameterKey=InstanceType,ParameterValue="t3.medium" \
-              ParameterKey=AMI,ParameterValue="ami-0261755bbcb8c4a84" \
-            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM; then
-            echo "Failed to create change set"
-            exit 1
-          fi
-
-          # Wait for change set creation
-          if ! aws cloudformation wait change-set-create-complete \
-            --stack-name $STACK_NAME \
-            --change-set-name $CHANGE_SET_NAME; then
-            echo "Change set creation failed"
-            aws cloudformation describe-change-set --stack-name $STACK_NAME --change-set-name $CHANGE_SET_NAME
-            exit 1
-          fi
-
-          # Check if there are changes
-          CHANGES=$(aws cloudformation describe-change-set \
-            --stack-name $STACK_NAME \
-            --change-set-name $CHANGE_SET_NAME \
-            --query 'Changes[].ResourceChange.ResourceType' \
-            --output text)
-
-          if [ -z "$CHANGES" ]; then
-            echo "No changes detected. Skipping update."
-            aws cloudformation delete-change-set \
-              --stack-name $STACK_NAME \
-              --change-set-name $CHANGE_SET_NAME
-            echo "stack_updated=false" >> $GITHUB_OUTPUT
-          else
-            echo "Changes detected. Updating stack..."
-            if ! aws cloudformation execute-change-set \
-              --stack-name $STACK_NAME \
-              --change-set-name $CHANGE_SET_NAME; then
-              echo "Failed to execute change set"
-              exit 1
-            fi
-            if ! aws cloudformation wait stack-update-complete \
-              --stack-name $STACK_NAME; then
-              echo "Stack update failed"
-              aws cloudformation describe-stack-events --stack-name $STACK_NAME --query 'StackEvents[?ResourceStatus==`UPDATE_FAILED`].[LogicalResourceId,ResourceStatusReason]' --output table
-              exit 1
-            fi
-            echo "stack_updated=true" >> $GITHUB_OUTPUT
-          fi
-        fi
+        fi      
       env:
         NODE_TYPE: ${{ env.NODE_TYPE }}
         AMI_ID: ${{ env.AMI_ID }}
@@ -187,7 +134,10 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       cluster_name: ${{ steps.cluster_info.outputs.cluster_name }}
-    steps:      
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3 
+
       - name: Download SSH key
         uses: actions/download-artifact@v3
         with:
@@ -227,7 +177,9 @@ jobs:
       runs-on: ubuntu-latest
       outputs:
         nginx_url: ${{ steps.nginx-url.outputs.nginx_url }}
-      steps:        
+      steps:
+      - name: Checkout code
+        uses: actions/checkout@v3      
       - name: Download SSH key
         uses: actions/download-artifact@v3
         with:
@@ -279,6 +231,8 @@ jobs:
     outputs:
       kibana_url: ${{ steps.kibana-url.outputs.kibana_url }}
     steps:
+    - name: Checkout code
+      uses: actions/checkout@v3 
     - name: Download SSH key
       uses: actions/download-artifact@v3
       with:
@@ -307,7 +261,9 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       grafana_url: ${{ steps.grafana-url.outputs.grafana_url }}
-    steps:    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3       
     - name: Download SSH key
       uses: actions/download-artifact@v3
       with:
@@ -415,6 +371,8 @@ jobs:
     needs: [Deploy_CloudFormation, Deploy_Nginx, Deploy_EFK, Conexion_EC2, Deploy_Monitoring]
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v3 
       - name: Create connection info
         run: |
           cat <<EOF > connection_info.txt
@@ -436,6 +394,8 @@ jobs:
     needs: [Create_Connection_Info]
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v3 
       - name: Download connection info
         uses: actions/download-artifact@v3
         with:
@@ -452,6 +412,8 @@ jobs:
     needs: [Deploy_CloudFormation, Conexion_EC2]
     runs-on: ubuntu-latest
     steps:
+    - name: Checkout code
+      uses: actions/checkout@v3   
     - name: Download SSH key
       uses: actions/download-artifact@v3
       with:
