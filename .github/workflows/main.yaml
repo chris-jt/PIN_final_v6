@@ -201,6 +201,11 @@ jobs:
       - name: List files
         run: ls -la
 
+      - name: List workspace contents
+        run: |
+          pwd
+          ls -R $GITHUB_WORKSPACE
+          
       - name: Connect to EC2 and setup cluster
         if: needs.Deploy_CloudFormation.outputs.stack_updated == 'true'
         run: |
@@ -208,7 +213,10 @@ jobs:
             'CLUSTER_NAME=cluster-PIN \
             AWS_REGION=us-east-1 \
             NODE_TYPE=t3.medium \
-            NODE_COUNT=3 bash -s' < $GITHUB_WORKSPACE/ec2_user_data.sh
+            NODE_COUNT=3 bash -s' <<EOF
+            $(cat $GITHUB_WORKSPACE/ec2_user_data.sh)
+            EOF
+        
 
       - name: Get cluster info
         id: cluster_info
