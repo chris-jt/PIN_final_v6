@@ -75,22 +75,85 @@ jobs:
         name: cloudformation-template
         path: cloudformation
 
-    - name: Check if CloudFormation stack exists
-      id: check-cfn
+    - name: Deploy or update CloudFormation stack
+      id: deploy-cfn     
       run: |
-          STACK_NAME=jenkins-ec2-stack
-      
-          if aws cloudformation describe-stacks --stack-name $STACK_NAME &>/dev/null; then
-            echo "Stack exists."
-            echo "stack_exists=true" >> $GITHUB_OUTPUT
-          else
-            echo "Stack does not exist."
-            echo "stack_exists=false" >> $GITHUB_OUTPUT
+        STACK_NAME=jenkins-ec2-stack
+
+        if aws cloudformation describe-stacks --stack-name $STACK_NAME 2>&1 | grep -q 'does not exist'; then
+          echo "Stack does not exist. Creating new stack..."
+          if ! aws cloudformation deploy \
+            --template-file cloudformation/ec2-stack.yaml \
+            --stack-name $STACK_NAME \
+            --parameter-overrides \
+              KeyName=jenkins \
+              PublicKeyMaterial="$(cat jenkins.pub)" \
+              InstanceType="t3.medium" \
+              AMI="ami-0261755bbcb8c4a84" \
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM; then
+            echo "Failed to create stack"
+            aws cloudformation describe-stack-events --stack-name $STACK_NAME --query 'StackEvents[?ResourceStatus==`CREATE_FAILED`].[LogicalResourceId,ResourceStatusReason]' --output table
+            exit 1
           fi
+          echo "stack_updated=true" >> $GITHUB_OUTPUT
+        else
+          echo "Stack exists. Checking for changes..."
+          CHANGE_SET_NAME="change-set-$(date +%s)"
+          if ! aws cloudformation create-change-set \
+            --stack-name $STACK_NAME \
+            --template-body file://cloudformation/ec2-stack.yaml \
+            --change-set-name $CHANGE_SET_NAME \
+            --parameters \
+              ParameterKey=InstanceType,ParameterValue="t3.medium" \
+              ParameterKey=AMI,ParameterValue="ami-0261755bbcb8c4a84" \
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM; then
+            echo "Failed to create change set"
+            exit 1
+          fi
+
+          # Wait for change set creation
+          if ! aws cloudformation wait change-set-create-complete \
+            --stack-name $STACK_NAME \
+            --change-set-name $CHANGE_SET_NAME; then
+            echo "Change set creation failed"
+            aws cloudformation describe-change-set --stack-name $STACK_NAME --change-set-name $CHANGE_SET_NAME
+            exit 1
+          fi
+
+          # Check if there are changes
+          CHANGES=$(aws cloudformation describe-change-set \
+            --stack-name $STACK_NAME \
+            --change-set-name $CHANGE_SET_NAME \
+            --query 'Changes[].ResourceChange.ResourceType' \
+            --output text)
+
+          if [ -z "$CHANGES" ]; then
+            echo "No changes detected. Skipping update."
+            aws cloudformation delete-change-set \
+              --stack-name $STACK_NAME \
+              --change-set-name $CHANGE_SET_NAME
+            echo "stack_updated=false" >> $GITHUB_OUTPUT
+          else
+            echo "Changes detected. Updating stack..."
+            if ! aws cloudformation execute-change-set \
+              --stack-name $STACK_NAME \
+              --change-set-name $CHANGE_SET_NAME; then
+              echo "Failed to execute change set"
+              exit 1
+            fi
+            if ! aws cloudformation wait stack-update-complete \
+              --stack-name $STACK_NAME; then
+              echo "Stack update failed"
+              aws cloudformation describe-stack-events --stack-name $STACK_NAME --query 'StackEvents[?ResourceStatus==`UPDATE_FAILED`].[LogicalResourceId,ResourceStatusReason]' --output table
+              exit 1
+            fi
+            echo "stack_updated=true" >> $GITHUB_OUTPUT
+          fi
+        fi
       env:
         NODE_TYPE: ${{ env.NODE_TYPE }}
         AMI_ID: ${{ env.AMI_ID }}
-        
+
     - name: Get EC2 Public IP
       id: ec2-ip
       run: |
@@ -140,7 +203,7 @@ jobs:
         run: |
           pwd
           ls -R $GITHUB_WORKSPACE
-
+          
       - name: Connect to EC2 and setup cluster
         if: needs.Deploy_CloudFormation.outputs.stack_updated == 'true'
         run: |
