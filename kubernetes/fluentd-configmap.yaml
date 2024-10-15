@@ -30,8 +30,12 @@ data:
       </parse>
     </source>
 
-    <filter kubernetes.**>
-      @type kubernetes_metadata
+    <filter kubernetes.nginx>
+      @type parser
+      key_name log
+      <parse>
+        @type nginx
+      </parse>
     </filter>
 
     <match **>
